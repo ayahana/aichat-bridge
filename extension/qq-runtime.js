@@ -204,19 +204,19 @@ export class ExtensionEngine {
     try {
       await this.store.deliveryStarted(item.id);
       if (item.kind === 'post') {
-        await adapter.replyPost({ chatId: item.chatId, messageId: item.messageId, post: item.post, msgSeq: item.msgSeq, expiresAt: item.expiresAt });
-        await this.store.replySent(item.id);
+        const receipt = await adapter.replyPost({ chatId: item.chatId, messageId: item.messageId, post: item.post, msgSeq: item.msgSeq, expiresAt: item.expiresAt });
+        await this.store.replySent(item.id, receipt);
       } else if (item.kind === 'image') {
         if (!item.imageKey) {
           const receipt = await adapter.uploadImage({ chatId: item.chatId, expiresAt: item.expiresAt, buffer: await this.store.imageBuffer(item), mimeType: item.image.mimeType });
           await this.store.imageUploaded(item.id, receipt.imageKey, receipt.ttl);
         } else {
-          await adapter.replyImage({ chatId: item.chatId, messageId: item.messageId, imageKey: item.imageKey, msgSeq: item.msgSeq, expiresAt: item.expiresAt });
-          await this.store.replySent(item.id);
+          const receipt = await adapter.replyImage({ chatId: item.chatId, messageId: item.messageId, imageKey: item.imageKey, msgSeq: item.msgSeq, expiresAt: item.expiresAt });
+          await this.store.replySent(item.id, receipt);
         }
       } else {
-        await adapter.reply({ chatId: item.chatId, messageId: item.messageId, text: item.text, msgSeq: item.msgSeq, expiresAt: item.expiresAt });
-        await this.store.replySent(item.id);
+        const receipt = await adapter.reply({ chatId: item.chatId, messageId: item.messageId, text: item.text, msgSeq: item.msgSeq, expiresAt: item.expiresAt });
+        await this.store.replySent(item.id, receipt);
       }
     } catch (error) {
       if (item.kind === 'image' && error?.retryable === false) await this.store.imageReplyRejected(item.id);
@@ -235,6 +235,9 @@ export class ExtensionEngine {
         return this.track(() => this.store.clearHistory());
       case '/v1/config': return this.configure(body);
       case '/v1/moderation': return Object.hasOwn(body, 'words') ? this.saveWords(body) : this.words();
+      case '/v1/group-policy':
+        if (this.configBusy || this.stopping) throw new BridgeError('配置正在更新，请稍后再修改群策略', 409);
+        return this.track(() => this.store.setGroupPolicy(body));
       case '/v1/bind':
       case '/v1/unbind':
         if (this.configBusy) throw new BridgeError('应用配置正在更新，请稍后再修改群绑定', 409);
@@ -243,7 +246,7 @@ export class ExtensionEngine {
         if (!this.enabled) return { job: null, notice: '该平台已停用' };
         return this.track(() => { this.requireEnabled(); return this.store.poll(body); });
       default: {
-        const match = /^\/v1\/jobs\/([a-f0-9-]{36})\/(started|input-image|image|result|error|cancel)$/.exec(route);
+        const match = /^\/v1\/jobs\/([a-f0-9-]{36})\/(stage|started|input-image|image|result|error|cancel)$/.exec(route);
         if (!match) throw new BridgeError('不允许的扩展请求', 404);
         if (match[2] === 'cancel') return this.track(async () => {
           const receipt = await this.store.cancel(match[1]);

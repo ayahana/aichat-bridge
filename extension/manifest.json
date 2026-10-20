@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "AIChat桥接",
-  "version": "0.1.6",
+  "name": "AIChat桥接 · 群聊实验版",
+  "version": "0.1.7",
   "minimum_chrome_version": "120",
   "description": "ChatGPT、Claude、Gemini 与海外版 Qwen 网页独立连接 QQ 和飞书机器人，支持双通道、图片、富文本回复与关键词拦截。",
   "permissions": [
@@ -65,5 +65,6 @@
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' https://open.feishu.cn wss://*.feishu.cn https://api.bot.qq.com wss://api.bot.qq.com wss://api.sgroup.qq.com wss://wss.api.sgroup.qq.com https://multimedia.nt.qq.com.cn https://gchat.qpic.cn https://c2cpicdw.qpic.cn https://chatgpt.com https://claude.ai https://gemini.google.com https://*.oaiusercontent.com https://chat.qwen.ai https://qwen-webui-prod.oss-accelerate.aliyuncs.com blob:"
-  }
+  },
+  "version_name": "0.1.7-groupchat.1"
 }

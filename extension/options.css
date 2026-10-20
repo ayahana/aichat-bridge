@@ -236,3 +236,14 @@ body .mark,body[data-platform="feishu"] .mark,body[data-assistant="claude"] .mar
 @media(min-width:1101px){.assistant-panel .assistant-card-heading{flex-direction:column;align-items:flex-start}}
 
 .notice small{display:block;margin-top:6px}
+
+/* QQ per-group opt-in controls. */
+#policy-fields{border:1px solid var(--border);border-radius:10px;margin:12px 0 0;padding:12px 14px;min-width:0}
+#policy-fields legend{font-size:12px;color:var(--muted);padding:0 5px}
+.policy-check{display:flex;align-items:flex-start;gap:9px;line-height:1.6;cursor:pointer}
+.policy-check input{width:17px;height:17px;flex-shrink:0;margin:2px 0 0;padding:0;accent-color:var(--accent)}
+.policy-number-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.policy-consent{margin-top:16px;padding:10px 13px;border:1px solid var(--error-border);border-radius:9px;background:var(--error-bg)}
+.policy-consent .policy-check{color:var(--error-text);margin-top:0}
+#policy-save-state{min-height:20px}
+@media(max-width:750px){.policy-number-grid{grid-template-columns:1fr;gap:0}}

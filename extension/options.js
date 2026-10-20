@@ -10,6 +10,50 @@ const ASSISTANTS = {
   gemini: { name: 'Gemini', path: '/app/<会话 ID>（多账号也支持 /u/<账号编号>/app/<会话 ID>）' }
 };
 const drafts = new Map();
+const policyDrafts = new Map(), policySelections = new Map();
+let policyGroups = [], policyScope = null;
+const policyKey = (assistant, chatId) => `${assistant}:qq:${chatId}`;
+const policyDefaults = { enabled: false, paused: false, nicknames: [], replyToBot: false, continuationSeconds: 0, contextEnabled: false, cooldownSeconds: 10, maxPending: 3 };
+const policyFields = { enabled: 'policy-enabled', paused: 'policy-paused', replyToBot: 'policy-reply-to-bot', contextEnabled: 'policy-context', continuationSeconds: 'policy-continuation', cooldownSeconds: 'policy-cooldown', maxPending: 'policy-max-pending' };
+function readPolicyForm() {
+  const value = {};
+  for (const [key, id] of Object.entries(policyFields)) value[key] = typeof policyDefaults[key] === 'boolean' ? $(id).checked : $(id).value;
+  value.nicknames = $('policy-nicknames').value;
+  return value;
+}
+function markPolicyDraft() {
+  const chatId = $('policy-group').value;
+  if (!policyScope || !chatId) return;
+  policyDrafts.set(policyKey(policyScope, chatId), readPolicyForm());
+  $('policy-save-state').textContent = '有未保存的修改；自动刷新不会覆盖。';
+}
+function loadPolicyForm() {
+  const chatId = $('policy-group').value, group = policyGroups.find(group => group.chatId === chatId);
+  const draft = policyDrafts.get(policyKey(policyScope, chatId));
+  const policy = draft || { ...policyDefaults, ...group?.policy };
+  for (const [key, id] of Object.entries(policyFields)) {
+    if (typeof policyDefaults[key] === 'boolean') $(id).checked = policy[key] === true;
+    else $(id).value = policy[key];
+  }
+  $('policy-nicknames').value = draft ? policy.nicknames : (Array.isArray(policy.nicknames) ? policy.nicknames.join('\n') : '');
+  const observed = group?.ordinaryObservedAt, date = new Date(observed);
+  $('policy-capability').textContent = observed && Number.isFinite(date.getTime())
+    ? `普通群消息接收能力：曾实际观察到（${date.toLocaleString('zh-CN')}）。不代表当前权限或引用回复能力始终可用。`
+    : '普通群消息接收能力：未知，尚未实际观察到。未收到普通消息时，昵称和连续对话不会生效。';
+  $('policy-save-state').textContent = draft ? '有未保存的修改；自动刷新不会覆盖。' : group ? '当前显示已保存设置。' : '请先在群内 @ 机器人并刷新，或先手动绑定群。';
+}
+function renderGroupPolicy(groups) {
+  $('group-policy-section').hidden = activePlatform !== 'qq';
+  if (activePlatform !== 'qq') return;
+  const selected = policyScope === activeAssistant ? $('policy-group').value : policySelections.get(activeAssistant);
+  policyScope = activeAssistant; policyGroups = groups;
+  $('policy-group').replaceChildren(new Option('选择一个 QQ 群', ''));
+  for (const group of groups) $('policy-group').add(new Option(group.name || group.chatId, group.chatId));
+  if (groups.some(group => group.chatId === selected)) $('policy-group').value = selected;
+  else if (groups.length === 1) $('policy-group').value = groups[0].chatId;
+  policySelections.set(activeAssistant, $('policy-group').value);
+  loadPolicyForm();
+}
 let channelStatuses = {};
 let activeAssistant = 'chatgpt', renderedAssistant = null, assistantStatuses = {}, viewReady = false;
 let activePlatform = null, tabs = [], refreshing = false, busy = false, replyStyleDirty = false, hasNotices = false, hasHistory = false;
@@ -46,6 +90,10 @@ function controls() {
     $('view-platform-' + platform).textContent = platform === activePlatform ? `正在配置 ${meta.name}` : `配置 ${meta.name}`;
     $('enabled-platform-' + platform).disabled = disabled || typeof channelStatuses[platform]?.enabled !== 'boolean';
   }
+  $('policy-group').disabled = disabled || activePlatform !== 'qq';
+  const policyDisabled = disabled || activePlatform !== 'qq' || !$('policy-group').value;
+  $('policy-fields').disabled = policyDisabled;
+  $('save-group-policy').disabled = policyDisabled;
   $('refresh').disabled = busy || refreshing;
   $('clear-notices').disabled = disabled || !hasNotices;
   $('clear-history').disabled = disabled || !hasHistory;
@@ -163,6 +211,14 @@ function renderJobs(jobs) {
       if (job.timing.background) stages.push('确认期间网页在后台');
       if (stages.length) detail.append(el('small', stages.join(' · '), 'timing'));
     }
+    if (job.diagnostics) {
+      const d = job.diagnostics, stages = d.stages || {};
+      const time = value => Number.isFinite(value) ? new Date(value).toLocaleTimeString('zh-CN') : '未知 / 尚未记录';
+      const duration = value => Number.isFinite(value) ? `${(Math.max(0, value) / 1000).toFixed(1)} 秒` : '未知 / 尚未记录';
+      detail.append(el('small', `领取任务：${time(d.leasedAt)} · 网页开始处理：${time(d.startedAt)} · 排队耗时：${duration(d.queueWaitMs)}`, 'timing'));
+      detail.append(el('small', `开始提交：${time(stages.submitting)} · 已匹配网页提问：${time(stages.submitted)} · 首次完整候选（非首 token）：${time(stages.first_output)}`, 'timing'));
+      if (!['completed', 'failed', 'cancelled'].includes(job.state)) detail.append(el('small', `剩余处理时间：${duration(d.remainingMs)}。提交确认以网页中匹配到用户提问为准，不是仅点击发送。`, 'timing'));
+    }
     const actions = el('div', undefined, 'job-actions'), state = el('span', states[job.state] || job.state, 'state' + (job.state === 'failed' ? ' failed' : ''));
     actions.append(state);
     if (job.state === 'queued') {
@@ -215,7 +271,7 @@ async function refresh() {
     for (const tab of tabs) $('tab').add(new Option(`${tab.title} · 标签页 ${tab.tabId}`, String(tab.tabId)));
     if (tabs.some(tab => String(tab.tabId) === selected)) $('tab').value = selected;
     $('tab').dispatchEvent(new Event('change'));
-    renderGroups(status.groups || []); renderJobs(status.jobs || []);
+    renderGroups(status.groups || []); renderGroupPolicy(status.groups || []); renderJobs(status.jobs || []);
     if (!replyStyleDirty) $('reply-style').value = status.replyStyle === 'card' ? 'card' : 'separate';
     for (const [platform, meta] of Object.entries(PLATFORMS)) {
       const saved = channelStatuses[platform];
@@ -318,6 +374,26 @@ $('bind-form').addEventListener('submit', event => { event.preventDefault(); act
   if (!tab || !chatId) throw new Error(`请填写 ${PLATFORMS[scope.platform].groupId} 或选择群，并选择一个已有对话。`);
   await platformRpc('options:bind', { chatId, tabId: tab.tabId, conversationUrl: tab.conversationUrl }, scope);
   feedback(`${scopeName(scope)} 群绑定完成。今后的 @ 提问会进入选定的网页对话。`); await refresh();
+}); });
+$('policy-group').addEventListener('change', () => {
+  policySelections.set(activeAssistant, $('policy-group').value); loadPolicyForm(); controls();
+});
+$('policy-fields').addEventListener('input', markPolicyDraft);
+$('policy-fields').addEventListener('change', markPolicyDraft);
+$('group-policy-form').addEventListener('submit', event => { event.preventDefault(); action(async scope => {
+  const chatId = $('policy-group').value;
+  if (scope.platform !== 'qq' || policyScope !== scope.assistant || !policyGroups.some(group => group.chatId === chatId)) throw new Error('请选择当前助手的 QQ 群。');
+  const form = readPolicyForm(), policy = { ...form, nicknames: [...new Set(form.nicknames.split(/\r?\n/).map(value => value.trim()).filter(Boolean))] };
+  if (policy.nicknames.length > 10 || policy.nicknames.some(name => name.length > 32 || /[\u0000-\u001f\u007f]/u.test(name))) throw new Error('昵称最多 10 个，每个 1–32 字符，不能含控制字符。');
+  for (const [key, min, max, label] of [['continuationSeconds', 0, 120, '连续对话窗口'], ['cooldownSeconds', 0, 300, '触发冷却'], ['maxPending', 1, 20, '待处理任务上限']]) {
+    const number = Number(form[key]);
+    if (!String(form[key]).trim() || !Number.isInteger(number) || number < min || number > max) throw new Error(`${label}必须是 ${min}–${max} 之间的整数。`);
+    policy[key] = number;
+  }
+  await platformRpc('options:group-policy', { chatId, policy }, scope);
+  policyDrafts.delete(policyKey(scope.assistant, chatId));
+  feedback(`${scopeName(scope)} 的群设置已保存。${policy.paused ? '此群已暂停接收新提问。' : policy.enabled ? '扩展触发仍取决于平台实际推送的消息。' : '保持默认仅 @ 触发。'}`);
+  await refresh();
 }); });
 $('tab').addEventListener('change', () => { $('tab-url').textContent = tabs.find(tab => String(tab.tabId) === $('tab').value)?.conversationUrl || ''; });
 $('refresh').addEventListener('click', () => { if (!busy) refresh().catch(error => feedback(error.message, true)); });

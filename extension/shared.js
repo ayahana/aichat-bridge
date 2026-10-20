@@ -34,6 +34,19 @@ export function isOptionsSender(sender, runtimeId, optionsUrl) {
 }
 export function validSession(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{12,100}$/.test(value); }
 
+export function validJobStage(value) { return ['submitting', 'submitted', 'first_output'].includes(value); }
+
+// Optional telemetry cannot block submission or delivery. Each bounded stage
+// is attempted at most once, including after a rejected or stalled transport.
+export function createStageReporter(enabled, send) {
+  const sent = new Set();
+  return stage => {
+    if (!enabled || !validJobStage(stage) || sent.has(stage)) return;
+    sent.add(stage);
+    try { Promise.resolve(send(stage)).catch(() => {}); } catch {}
+  };
+}
+
 export function validChallengeCheckpoint(value) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
     typeof value.userKey === 'string' && value.userKey.startsWith('message:') && value.userKey.length > 8 && value.userKey.length <= 2048 &&

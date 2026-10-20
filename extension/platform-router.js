@@ -109,7 +109,8 @@ export class PlatformRouter {
     if (route === '/v1/channel') return this.setChannel(body?.platform, body?.enabled);
     const platform = platformId(body?.platform);
     if (this.switching || this.changingChannels.has(platform)) throw fault('连接正在启停，请稍后重试', 409);
-    if (!/^\/v1\/(?:config|moderation|history\/clear|bind|unbind|poll|jobs\/[a-f0-9-]{36}\/(?:started|input-image|image|result|error|cancel))$/.test(route)) throw fault('不允许的平台请求', 404);
+    if (!/^\/v1\/(?:group-policy|config|moderation|history\/clear|bind|unbind|poll|jobs\/[a-f0-9-]{36}\/(?:stage|started|input-image|image|result|error|cancel))$/.test(route)) throw fault('不允许的平台请求', 404);
+    if (platform !== 'qq' && (route === '/v1/group-policy' || route.endsWith('/stage'))) throw fault('群策略和阶段采样仅适用于 QQ', 404);
     const { platform: _platform, ...input } = body;
     if (route === '/v1/bind') {
       for (const other of PLATFORMS.filter(id => id !== platform)) {

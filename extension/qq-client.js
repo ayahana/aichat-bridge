@@ -185,6 +185,7 @@ export function createBrowserQQAdapter({ appId, appSecret, onMessage, onState = 
     catch { closeSocket(ws); return; }
     heartbeatTimer = schedule(() => heartbeat(ws, generation, interval), interval);
   }
+  let botId;
   async function connect(generation) {
     current(generation);
     const result = await authenticated('/gateway/bot', { generation });
@@ -228,9 +229,10 @@ export function createBrowserQQAdapter({ appId, appSecret, onMessage, onState = 
           if (payload.t === 'READY') {
             if (typeof payload.d?.session_id !== 'string' || !payload.d.session_id || payload.d.session_id.length > 256) throw invalid('QQ 会话标识无效');
             sessionId = payload.d.session_id;
+            botId = payload.d.user?.id;
           } else if (payload.t !== 'RESUMED') {
             if (!sessionId) throw invalid('QQ 尚未建立事件会话');
-            const message = normalizeMessage(payload);
+            const message = normalizeMessage(payload, { botId });
             if (message) await onMessage(message);
           }
           if (!isCurrent(ws, generation) || !accepting || ws.readyState !== 1) return;

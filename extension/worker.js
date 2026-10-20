@@ -1,4 +1,4 @@
-import { ASSISTANTS, ASSISTANT_NAMES, ASSISTANT_ORIGINS, conversationUrl, assistantId, assistantForUrl, safeError, isOptionsSender, validSession, resultTiming, normalizeText, validChallengeCheckpoint, pageDiagnostics } from './shared.js';
+import { ASSISTANTS, ASSISTANT_NAMES, ASSISTANT_ORIGINS, conversationUrl, assistantId, assistantForUrl, safeError, isOptionsSender, validSession, resultTiming, normalizeText, validChallengeCheckpoint, pageDiagnostics, validJobStage } from './shared.js';
 import { decodeImagePayload, validateInputImages, MAX_IMAGES, MAX_TOTAL_IMAGE_BYTES } from './dom.js';
 const JOB_PREFIX = 'bot.bridge.job.';
 const NOTICE_PREFIX = 'bot.bridge.notice.';
@@ -58,7 +58,7 @@ class HostError extends Error {
 }
 function hostError(message, status = 502) { return new HostError(message, status); }
 async function api(path, body) {
-  if (!/^\/v1\/(?:status|assistant|platform|channel|config|moderation|history\/clear|bind|unbind|poll|jobs\/[A-Za-z0-9_-]+\/(?:started|input-image|image|result|error|cancel))$/.test(path)) throw new Error('不允许的扩展请求');
+  if (!/^\/v1\/(?:group-policy|status|assistant|platform|channel|config|moderation|history\/clear|bind|unbind|poll|jobs\/[A-Za-z0-9_-]+\/(?:stage|started|input-image|image|result|error|cancel))$/.test(path)) throw new Error('不允许的扩展请求');
   assistantId(body?.assistant);
   if (!['/v1/status', '/v1/assistant'].includes(path) && !validPlatform(body?.platform)) throw new Error('聊天平台无效');
   let timer;
@@ -356,6 +356,12 @@ async function content(message, sender) {
       });
     }
     if (!existing || existing.id !== message.jobId || existing.sessionId !== message.sessionId || existing.conversationUrl !== url) throw new Error('任务与当前页面不匹配，已阻止操作');
+    if (message.type === 'bridge:stage') {
+      if (existing.platform !== 'qq' || existing.state !== 'started' || existing.expiresAt <= Date.now() || !validJobStage(message.stage)) return { ok: false };
+      // Optional telemetry must not delay the tab lock, result or error paths.
+      void api(`/v1/jobs/${existing.id}/stage`, { ...identity(existing), stage: message.stage }).catch(() => {});
+      return { ok: true };
+    }
     if (message.type === 'bridge:idle-prepare') {
       const diagnostics = pageDiagnostics(message.diagnostics);
       if (assistant !== 'chatgpt' || existing.state !== 'leased' || existing.idleRefresh || existing.expiresAt - Date.now() < 10000 ||
@@ -566,7 +572,7 @@ async function options(message) {
       return result;
     });
   }
-  if (!['options:moderation', 'options:save-words', 'options:reply-style', 'options:config', 'options:bind', 'options:unbind'].includes(message.type)) throw new Error('不允许的设置操作');
+  if (!['options:moderation', 'options:save-words', 'options:reply-style', 'options:config', 'options:bind', 'options:unbind', 'options:group-policy'].includes(message.type)) throw new Error('不允许的设置操作');
   const platform = await activePlatform(message.platform, assistant);
   if (message.type === 'options:moderation') return api('/v1/moderation', { assistant, platform });
   if (message.type === 'options:save-words') return api('/v1/moderation', { assistant, platform, words: message.words });
@@ -577,6 +583,10 @@ async function options(message) {
   if (message.type === 'options:config') {
     if (typeof message.appId !== 'string' || typeof message.appSecret !== 'string') throw new Error('应用配置格式无效');
     return api('/v1/config', { assistant, platform, appId: message.appId.trim(), appSecret: message.appSecret.trim() });
+  }
+  if (message.type === 'options:group-policy') {
+    if (platform !== 'qq') throw new Error('群聊策略仅适用于 QQ');
+    return api('/v1/group-policy', { assistant, platform, chatId: message.chatId, policy: message.policy });
   }
   if (message.type === 'options:bind') {
     if (!Number.isInteger(message.tabId) || typeof message.chatId !== 'string' || !message.chatId.trim()) throw new Error('请选择群和已有对话');
@@ -607,7 +617,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (!isOptionsSender(sender, chrome.runtime.id, chrome.runtime.getURL('options.html'))) throw new Error('只允许扩展设置页修改配置');
       return options(message);
     }
-    if (!['bridge:poll', 'bridge:started', 'bridge:input-image', 'bridge:image', 'bridge:result', 'bridge:error', 'bridge:challenge-prepare', 'bridge:challenge-resume', 'bridge:challenge-retry', 'bridge:idle-prepare'].includes(message.type)) throw new Error('不允许的页面操作');
+    if (!['bridge:stage', 'bridge:poll', 'bridge:started', 'bridge:input-image', 'bridge:image', 'bridge:result', 'bridge:error', 'bridge:challenge-prepare', 'bridge:challenge-resume', 'bridge:challenge-retry', 'bridge:idle-prepare'].includes(message.type)) throw new Error('不允许的页面操作');
     return content(message, sender);
   })().then(data => respond({ ok: true, data }), error => respond({ ok: false, error: safeError(error) }));
   return true;

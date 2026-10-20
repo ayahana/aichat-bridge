@@ -1,7 +1,7 @@
 (() => {
   if (globalThis.__chatGPTBotBridge) return;
   globalThis.__chatGPTBotBridge = true;
-  const CONTENT_VERSION = '0.1.6';
+  const CONTENT_VERSION = '0.1.7';
   const pageOpenedAt = Date.now();
   let bridgeIdleSince = pageOpenedAt;
   const IDLE_REFRESH_MS = 10 * 60 * 1000;
@@ -47,7 +47,7 @@
     ]).finally(() => clearTimeout(timer));
   }
   (async () => {
-    const { ASSISTANT_NAMES, assistantForUrl, conversationUrl, normalizeText, interruptsComposer } = await import(chrome.runtime.getURL('shared.js'));
+    const { ASSISTANT_NAMES, assistantForUrl, conversationUrl, normalizeText, interruptsComposer, createStageReporter } = await import(chrome.runtime.getURL('shared.js'));
     // The page origin selects the adapter. A job can never select a different
     // provider's selectors or widen the worker's sender authorization.
     const assistant = assistantForUrl(location.href);
@@ -115,7 +115,7 @@
         changed();
       });
     }
-    function completedAnswer({ baseline, user, check, deadline, fingerprint }) {
+    function completedAnswer({ baseline, user, check, deadline, fingerprint, reportStage }) {
       return new Promise((resolve, reject) => {
         let finished = false; let timer; let previous = ''; let stableSince = 0; let firstCandidateAt = null;
         let background = document.visibilityState !== 'visible';
@@ -143,7 +143,12 @@
             const now = Date.now();
             if (now >= deadline) throw new Error('没有识别到明确完成的最终回复；已停止转发');
             const current = fingerprint(candidate);
-            if (candidate && firstCandidateAt === null) firstCandidateAt = now;
+            if (candidate && firstCandidateAt === null) {
+              firstCandidateAt = now;
+              // This marks the first attribution-safe completed candidate, not
+              // a streaming token; no weaker DOM/ownership checks are added.
+              reportStage('first_output');
+            }
             if (!candidate || current !== previous) { previous = current; stableSince = now; }
             const stableMs = candidate?.images?.length ? 1200 : 800;
             const remaining = stableMs - (now - stableSince);
@@ -217,6 +222,9 @@
     async function run(job) {
       platformLabel = job.platform === 'feishu' ? '飞书' : job.platform === 'qq' ? 'QQ ' : '机器人';
       const url = job.conversationUrl;
+      // Older workers may reject this optional RPC. Feishu never receives it.
+      const reportStage = createStageReporter(job.platform === 'qq',
+        stage => rpc('bridge:stage', { jobId: job.id, conversationUrl: url, stage }));
       const deadline = Date.now() + job.timeoutMs;
       let human = false; let ownEditing = false; let submissionClicked = false;
       let input = null; let baseline = null; let user = null; let inputPreparationMs = 0;
@@ -358,13 +366,15 @@
           inputPreparationMs = Date.now() - inputPreparationStartedAt;
           submissionClicked = true;
           phase = 'submit';
+          reportStage('submitting');
           button.click(); // Exactly one click. Never retry submission.
           status('已发送，等待本次完整回复');
           user = await confirmedUser({ baseline, prompt: job.prompt, check, deadline });
+          reportStage('submitted');
         }
         const fingerprint = candidate => candidate ? JSON.stringify({ text: candidate.text, images: candidate.images || [] }) : '';
         phase = job.recovery ? 'challenge-recovery' : 'answer';
-        const { finalAnswer, confirmationMs, background } = await completedAnswer({ baseline, user, check, deadline, fingerprint });
+        const { finalAnswer, confirmationMs, background } = await completedAnswer({ baseline, user, check, deadline, fingerprint, reportStage });
         if (finalAnswer.text.length > 120000) throw new Error('最终回复超过 120000 字符，已停止回传；请在网页查看');
         check();
         // One last DOM check prevents a late stream update or manual new turn from slipping through.

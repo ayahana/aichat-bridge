@@ -1,4 +1,4 @@
-// QQ GROUP_AT_MESSAGE_CREATE only. Explicit reference replies can include
+// QQ addressed and ordinary group events; the store gates ordinary intake. Explicit reference replies can include
 // bounded quoted text and supported images; other forwarded message kinds
 // remain unsupported. No historical-message lookup or scene token is used.
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
@@ -103,15 +103,16 @@ function appendAttachments(attachments, normalized, seen, reason) {
 
 /** Current official group events already omit the bot's mention prefix. */
 export function normalizeMessage(payload, { botId } = {}) {
-  if (!payload || payload.t !== 'GROUP_AT_MESSAGE_CREATE' || !payload.d || typeof payload.d !== 'object' || Array.isArray(payload.d)) return null;
+  if (!payload || !['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE'].includes(payload.t) || !payload.d || typeof payload.d !== 'object' || Array.isArray(payload.d)) return null;
   const message = payload.d;
   if (message.author?.bot === true) return null;
   const senderId = message.author?.member_openid ?? message.author?.id;
+  if (validId(botId) && senderId === botId) return null;
   if (!validId(message.group_openid) || !validId(senderId) || !validMessageId(message.id)) return null;
   if (typeof message.timestamp !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(message.timestamp)) return null;
   const createdAt = Date.parse(message.timestamp);
   if (!Number.isSafeInteger(createdAt) || createdAt <= 0) return null;
-  const normalized = { messageId: message.id, chatId: message.group_openid, senderId, text: '', createdAt, images: [] };
+  const normalized = { messageId: message.id, chatId: message.group_openid, senderId, eventType: payload.t, text: '', createdAt, images: [] };
   const reject = unsupportedReason => ({ ...normalized, images: [], unsupportedAttachments: true, ...(unsupportedReason ? { unsupportedReason } : {}) });
   if (message.content !== undefined && typeof message.content !== 'string') return reject();
   let text = (message.content ?? '').trim();
@@ -122,6 +123,8 @@ export function normalizeMessage(payload, { botId } = {}) {
   }
   text = faceText(text);
   normalized.text = text;
+  normalized.currentText = text;
+  if (validMessageId(message.message_reference?.message_id)) normalized.replyToMessageId = message.message_reference.message_id;
   const reference = message.message_type === 103;
   if ((message.message_type !== undefined && message.message_type !== 0 && !reference) || message.ark_data) return reject();
   if (message.msg_elements !== undefined && !Array.isArray(message.msg_elements)) return reject();

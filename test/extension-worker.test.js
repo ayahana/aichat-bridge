@@ -1697,3 +1697,47 @@ test('transient protection reads preserve restoration records without blocking c
     assert.equal(x.tab.autoDiscardable, true, operation);
   }
 });
+test('QQ policy options and page stages cross worker host allowlist with sender checks',async()=>{
+ const x=await setup();
+ const policy={enabled:true,nicknames:['Bot']};
+ assert.equal((await x.send({type:'options:group-policy',platform:'qq',chatId:'group',policy})).ok,false);
+ assert.equal((await x.send({type:'options:group-policy',platform:'qq',chatId:'group',policy},x.optionsSender)).ok,true);
+ assert.deepEqual(x.calls.find(c=>c.path==='/v1/group-policy').body,{assistant:'chatgpt',platform:'qq',chatId:'group',policy});
+ await x.send({type:'bridge:poll'});await x.send({type:'bridge:started',jobId:'job-1'});
+ assert.equal((await x.send({type:'bridge:stage',jobId:'job-1',stage:'submitted'})).ok,true);
+ await tick();assert.equal(x.calls.filter(c=>c.path==='/v1/jobs/job-1/stage').length,1);
+ const body=x.calls.find(c=>c.path==='/v1/jobs/job-1/stage').body;
+ assert.equal(body.stage,'submitted');assert.equal(body.leaseToken,'lease-secret');
+ await x.send({type:'bridge:stage',jobId:'job-1',stage:'arbitrary'});await tick();
+ assert.equal(x.calls.filter(c=>c.path.endsWith('/stage')).length,1);
+});
+test('policy and stages traverse worker host envelope and real assistant/platform/runtime/store stack',async()=>{
+ const {AssistantRouter}=await import('../extension/assistant-router.js');
+ const {PlatformRouter}=await import('../extension/platform-router.js');
+ const {ExtensionEngine:QQRuntime}=await import('../extension/qq-runtime.js');
+ const {ExtensionEngine:FeishuRuntime}=await import('../extension/feishu-runtime.js');
+ const {BridgeStore:FeishuStore}=await import('../extension/feishu-store.js');
+ const routers={},queues={};
+ for(const assistant of ASSISTANTS) {
+  const engines={};
+  for(const [platform,Store,Runtime] of [['qq',QQStore,QQRuntime],['feishu',FeishuStore,FeishuRuntime]]) {
+   const storage={state:null,async readState(){return structuredClone(this.state);},async listImageKeys(){return [];},async commit({state,expectedRevision}){assert.equal(this.state?.revision??0,expectedRevision);this.state=structuredClone({...state,revision:expectedRevision+1});return this.state.revision;}};
+   const store=await Store.open({storage,assistant,moderate:()=>({blocked:false})});queues[`${assistant}:${platform}`]=store;
+   engines[platform]=new Runtime({store,readConfig:async()=>({}),writeConfig:async()=>{},adapterFactory:()=>{throw new Error('No real transport allowed');},defaultWords:['blocked'],setWords:()=>{}});
+  }
+  routers[assistant]=new PlatformRouter({engines,readSelection:async()=> 'qq',writeSelection:async()=>{}});
+ }
+ const router=new AssistantRouter({routers});await router.init();
+ const queue=queues['chatgpt:qq'];await queue.bind({chatId:'group',browserId:'browser-one',tabId:7,conversationUrl:url});
+ const x=await setup({request:(path,body)=>router.request(path,body)});
+ const saved=await x.send({type:'options:group-policy',platform:'qq',chatId:'group',policy:{enabled:true,nicknames:['Bot']}},x.optionsSender);
+ assert.equal(saved.ok,true);assert.equal((await queue.status()).groups[0].policy.enabled,true);
+ await queue.ingest({messageId:'integration-message',chatId:'group',senderId:'member',eventType:'GROUP_MESSAGE_CREATE',text:'Bot: hello',createdAt:Date.now()});
+ const polled=await x.send({type:'bridge:poll'});assert.equal(polled.ok,true);const id=polled.data.job.id;
+ assert.equal((await x.send({type:'bridge:started',jobId:id})).ok,true);
+ assert.equal((await x.send({type:'bridge:stage',jobId:id,stage:'submitted'})).ok,true);
+ for(let i=0;i<10;i++) await tick();
+ assert.ok((await queue.status()).jobs[0].diagnostics.stages.submitted);
+ assert.equal((await queues['chatgpt:feishu'].status()).jobs.length,0);
+
+});

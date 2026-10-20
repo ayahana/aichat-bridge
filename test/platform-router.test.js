@@ -340,3 +340,13 @@ test('invalid saved channel preferences fail before any connections are opened',
     assert.equal(qq.calls.length, 0); assert.equal(feishu.calls.length, 0);
   }
 });
+test('QQ group policy and optional stage endpoints route only to QQ', async()=>{
+ const f=await mocked();
+ const policy={enabled:true};
+ await f.router.request('/v1/group-policy',{platform:'qq',chatId:'group',policy});
+ assert.deepEqual(f.qq.calls.at(-1),['request','/v1/group-policy',{chatId:'group',policy}]);
+ await f.router.request(`/v1/jobs/${jobId}/stage`,{platform:'qq',stage:'submitted'});
+ assert.deepEqual(f.qq.calls.at(-1),['request',`/v1/jobs/${jobId}/stage`,{stage:'submitted'}]);
+ await assert.rejects(f.router.request('/v1/group-policy',{platform:'feishu',policy}));
+ await assert.rejects(f.router.request(`/v1/jobs/${jobId}/stage`,{platform:'feishu',stage:'submitted'}));
+});

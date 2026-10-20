@@ -75,7 +75,7 @@ test('both public QQ reference text shapes normalize into one bounded ordinary t
   ]) {
     const f = await fixture(); const message = normalizeMessage(event(extra));
     assert.equal((await f.store.ingest(message)).accepted, true);
-    const { job } = await f.store.poll(caller); assert.equal(job.prompt, message.text);
+    const { job } = await f.store.poll(caller); assert.ok(job.prompt.endsWith(message.text)); assert.match(job.prompt, /reference-user/);
     assert.ok(job.prompt.length <= 12000); assert.equal(job.images, undefined);
     assert.equal((await f.store.status()).jobs.length, 1);
   }

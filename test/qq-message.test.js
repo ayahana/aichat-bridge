@@ -8,10 +8,11 @@ const base = () => ({ op: 0, t: 'GROUP_AT_MESSAGE_CREATE', d: {
 } });
 const attachment = index => ({ content_type: 'image/png', size: 100, url: `https://multimedia.nt.qq.com.cn/download?fileid=${index}&rkey=private-fixture` });
 
-test('only addressed group events normalize and retain independent identity and timestamp', () => {
+test('addressed and ordinary group events normalize and retain independent identity and timestamp', () => {
   const event = base();
-  assert.deepEqual(normalizeMessage(event), { messageId: event.d.id, chatId: event.d.group_openid, senderId: event.d.author.member_openid, createdAt: Date.parse(event.d.timestamp), text: '比较这些图片', images: [] });
-  for (const type of ['GROUP_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE', 'MESSAGE_CREATE', 'READY']) assert.equal(normalizeMessage({ ...event, t: type }), null);
+  assert.deepEqual(normalizeMessage(event), { messageId: event.d.id, chatId: event.d.group_openid, senderId: event.d.author.member_openid, createdAt: Date.parse(event.d.timestamp), eventType: 'GROUP_AT_MESSAGE_CREATE', currentText: '比较这些图片', text: '比较这些图片', images: [] });
+  for (const type of ['C2C_MESSAGE_CREATE', 'MESSAGE_CREATE', 'READY']) assert.equal(normalizeMessage({ ...event, t: type }), null);
+  assert.equal(normalizeMessage({ ...event, t: 'GROUP_MESSAGE_CREATE' }).eventType, 'GROUP_MESSAGE_CREATE');
   assert.equal(normalizeMessage(event.d), null); assert.equal(normalizeMessage(null), null);
   for (const patch of [{ id: '../\nprivate' }, { group_openid: '../group' }, { author: { bot: true, member_openid: 'member' } }, { author: {} }, { timestamp: 'yesterday' }]) assert.equal(normalizeMessage({ ...event, d: { ...event.d, ...patch } }), null);
 });

@@ -1,3 +1,4 @@
+import { groupPolicy, triggerFor, boundedContext, groupPrompt } from './group-policy.js';
 import { clearableHistoryIds } from './history.js';
 import { IndexedDBStorage } from './storage.js';
 import { ASSISTANT_NAMES, assistantId, conversationUrl, resultTiming } from './shared.js';
@@ -21,7 +22,7 @@ const DAY = 86_400_000;
 const GENERATION_TIMEOUT = 4 * 60_000;
 const RETRY_WINDOW = REPLY_WINDOW_MS;
 const TYPES = Object.freeze({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' });
-const PUBLIC_METHODS = ['clearHistory', 'ingest', 'cancel', 'poll', 'started', 'inputImage', 'image', 'result', 'error', 'bind', 'unbind', 'status', 'nextReply', 'replySent', 'replyFailed', 'nextInputImage', 'inputImageDownloaded', 'inputImageFailed', 'imageBuffer', 'imageUploaded', 'imageReplyRejected', 'postReplyRejected', 'sweep', 'recover', 'replyRejected', 'deliveryStarted'];
+const PUBLIC_METHODS = ['setGroupPolicy', 'stage', 'clearHistory', 'ingest', 'cancel', 'poll', 'started', 'inputImage', 'image', 'result', 'error', 'bind', 'unbind', 'status', 'nextReply', 'replySent', 'replyFailed', 'nextInputImage', 'inputImageDownloaded', 'inputImageFailed', 'imageBuffer', 'imageUploaded', 'imageReplyRejected', 'postReplyRejected', 'sweep', 'recover', 'replyRejected', 'deliveryStarted'];
 const MODERATION_MESSAGES = Object.freeze({
   keyword: '已拦截：这条消息触发本群关键词限制，未发送到 ChatGPT。请换一个合适的问题。',
   configuration: '已停止：扩展关键词过滤配置不可用，暂不向 ChatGPT 发送问题。请管理员检查扩展词表。',
@@ -169,6 +170,9 @@ export class BridgeStore {
     if (delivery.state === next) return;
     delivery.state = next;
     delivery.finishedAt = this.now();
+    const group = state.groups[job.chatId];
+    const policy = groupPolicy(group?.policy);
+    if (next === 'sent' && group?.binding?.version === job.binding?.version && policy.enabled && !policy.paused && policy.continuationSeconds && job.trigger !== 'continuation' && job.senderId) group.session = { senderId: job.senderId, startedAt: this.now(), expiresAt: this.now() + policy.continuationSeconds * 1000 };
     if (failed) job.error = '正文或图片未能全部确认送达，请检查投递状态。';
   }
 
@@ -226,6 +230,7 @@ export class BridgeStore {
         }
       }
       const group = Object.hasOwn(state.groups, id) ? state.groups[id] : { chatId: id, lastSeen: 0 };
+      delete group.context; delete group.session; delete group.sentMessageIds;
       group.binding = { ...destination, version: crypto.randomUUID() };
       state.groups[id] = group;
       return { ok: true };
@@ -236,7 +241,27 @@ export class BridgeStore {
     const id = chatId(input.chatId);
     return await this.commit(state => {
       if (state.jobs.some(j => j.chatId === id && ACTIVE.has(j.state))) throw new BridgeError('该群还有待完成任务，请等待完成或超时后再解除绑定', 409);
-      if (Object.hasOwn(state.groups, id)) delete state.groups[id].binding;
+      if (Object.hasOwn(state.groups, id)) { delete state.groups[id].binding; delete state.groups[id].context; delete state.groups[id].session; delete state.groups[id].sentMessageIds; }
+      return { ok: true };
+    });
+  }
+
+  async setGroupPolicy(input) {
+    const id = chatId(input.chatId);
+    let policy;
+    try { policy = groupPolicy(input.policy); } catch (error) { throw new BridgeError(error.message); }
+    if (!this.data.groups[id]?.binding) throw new BridgeError('请先绑定该群的专用网页对话');
+    return this.commit(state => {
+      const group = state.groups[id]; group.policy = policy;
+      delete group.session;
+      if (!policy.enabled || !policy.contextEnabled || policy.paused) {
+        delete group.context;
+        // Do not later submit snapshots after the operator revoked context intake.
+        for (const job of state.jobs) if (job.chatId === id && job.state === 'queued' && job.contextUsed) {
+          job.state = 'cancelled'; job.finishedAt = this.now();
+          delete job.prompt; delete job.imageRefs; delete job.inputImages;
+        }
+      }
       return { ok: true };
     });
   }
@@ -246,17 +271,40 @@ export class BridgeStore {
     const id = text(message.messageId, '消息 ID', 512);
     if (Object.hasOwn(this.data.seen, id)) return { accepted: false, duplicate: true };
     const chat = chatId(message.chatId);
+    const ordinary = message.eventType === 'GROUP_MESSAGE_CREATE';
+    // Unconfigured ordinary groups are silent and do not grow persistent state.
+    if (ordinary && !this.data.groups[chat]?.binding) return { accepted: false, ignored: true };
+    if (message.senderId !== undefined && (typeof message.senderId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(message.senderId))) return { accepted: false, ignored: true };
+    if (this.data.groups[chat]?.sentMessageIds?.some(x => x.id === id)) return { accepted: false, ignored: true };
     // Don't replay old QQ deliveries after restart or an extended offline period.
     const timestamp = Number(message.createdAt);
-    if (!Number.isFinite(timestamp) || timestamp < this.now() - REPLY_WINDOW_MS + 5000 || timestamp > this.now() + 5 * 60000) return { accepted: false, stale: true };
+    if (!Number.isFinite(timestamp) || timestamp < this.now() - REPLY_WINDOW_MS + 5000 || timestamp > this.now() + (ordinary ? 5000 : 5 * 60000)) return { accepted: false, stale: true };
     return await this.commit(state => {
       Object.defineProperty(state.seen, id, { value: this.now(), enumerable: true, writable: true, configurable: true });
-      Object.defineProperty(state.receipts, id, { value: { expiresAt: Math.min(timestamp, this.now()) + REPLY_WINDOW_MS - 5000, nextSeq: 1 }, enumerable: true, writable: true, configurable: true });
       const group = Object.hasOwn(state.groups, chat) ? state.groups[chat] : { chatId: chat, lastSeen: 0 };
       group.lastSeen = this.now();
       state.groups[chat] = group;
+      const policy = groupPolicy(group.policy);
+      if (ordinary) group.ordinaryObservedAt = this.now();
+      const trigger = triggerFor(message, group, this.now());
+      const context = policy.enabled && policy.contextEnabled ? boundedContext(group.context, this.now()) : [];
+      // Cache only moderated plain text, never attachments or unsupported data.
+      if (ordinary && policy.enabled && policy.contextEnabled && !policy.paused && !message.unsupportedAttachments && message.text && !this.checkModeration(message.text).blocked) {
+        group.context = boundedContext([...context, { senderId: message.senderId, text: message.text.slice(0, 500), at: Math.min(timestamp, this.now()) }], this.now());
+        const cached = Object.values(state.groups).filter(g => g.context?.length).sort((a,b) => b.lastSeen - a.lastSeen);
+        for (const older of cached.slice(32)) delete older.context;
+      }
+      // Bound ordinary dedup metadata independently of the legacy retention window.
+      state.ordinarySeen ??= [];
+      if (ordinary) {
+        state.ordinarySeen.push(id);
+        for (const old of state.ordinarySeen.splice(0, Math.max(0, state.ordinarySeen.length - 2000))) if (!state.receipts[old]) delete state.seen[old];
+      }
+      if (!trigger) return { accepted: false, ignored: true };
+      if (ordinary && group.lastAcceptedAt !== undefined && this.now() - group.lastAcceptedAt < policy.cooldownSeconds * 1000) return { accepted: false, limited: true };
+      Object.defineProperty(state.receipts, id, { value: { expiresAt: Math.min(timestamp, this.now()) + REPLY_WINDOW_MS - 5000, nextSeq: 1 }, enumerable: true, writable: true, configurable: true });
       let prompt = typeof message.text === 'string' ? message.text.trim() : '';
-      const reject = reason => { this.addReply(state, id, chat, reason); return { accepted: false }; };
+      const reject = reason => { if (!ordinary) this.addReply(state, id, chat, reason); else delete state.receipts[id]; return { accepted: false }; };
       if (message.unsupportedAttachments) {
         if (message.unsupportedReason === 'reference_without_current_content') return reject('QQ 没有提供这条引用回复中可读取的文字或当前图片，请取消引用后重新发送问题。');
         if (message.unsupportedReason === 'reference_too_large') return reject('这条引用回复包含过多或过长的内容，请缩短引用内容，或取消引用后重新发送问题。');
@@ -271,18 +319,21 @@ export class BridgeStore {
       if (!prompt && imageKeys.length) prompt = '请分析这条消息中的图片。';
       if (!prompt) return reject('请在 @机器人 后输入文字问题。');
       if (prompt.length > 12000) return reject('这条消息超过 12000 字符，请拆成较短的问题再发送。');
+      prompt = groupPrompt(prompt, message.senderId, context);
+      if (prompt.length > 12000) return reject('问题与上下文超过 12000 字符，请缩短问题或关闭上下文。');
       const decision = this.checkModeration(prompt);
       if (decision.blocked) { reject(moderationMessage(decision, this.assistant)); return { accepted: false, blocked: true }; }
       if (!group.binding) return reject(`这个群还没有绑定 ${this.assistantName} 网页。请在 Chrome 桥接扩展设置中选择该群并绑定专用对话。\n群 ID：${chat}`);
       const pending = state.jobs.filter(j => ACTIVE.has(j.state));
-      if (pending.length >= 100 || pending.filter(j => j.chatId === chat).length >= 20) return reject('当前排队消息较多，请稍后再发送。');
+      if (pending.length >= 100 || pending.filter(j => j.chatId === chat).length >= (policy.enabled ? policy.maxPending : 20)) return reject('当前排队消息较多，请稍后再发送。');
       const job = {
-        id: crypto.randomUUID(), messageId: id, chatId: chat, prompt, state: 'queued',
+        id: crypto.randomUUID(), messageId: id, chatId: chat, senderId: message.senderId, trigger, contextUsed: context.length > 0, prompt, state: 'queued',
         createdAt: this.now(), replyExpiresAt: state.receipts[id].expiresAt, deadline: state.receipts[id].expiresAt - DELIVERY_RESERVE_MS,
         binding: structuredClone(group.binding), replyStyle,
         ...(imageKeys.length ? { imageRefs: imageKeys.map(imageKey => ({ imageKey, attempts: 0, nextAttemptAt: this.now() })), inputImages: [] } : {}),
       };
       state.jobs.push(job);
+      group.lastAcceptedAt = this.now();
       return { accepted: true, jobId: job.id };
     });
   }
@@ -318,7 +369,7 @@ export class BridgeStore {
       if (job.binding.version !== group.binding.version) throw new BridgeError('绑定已变化，请重新发送消息', 409);
       const decision = this.checkModeration(job.prompt);
       if (decision.blocked) { this.blockJob(state, job, decision); return { job: null }; }
-      job.state = 'leased'; job.leaseToken = randomHex(24);
+      job.state = 'leased'; job.leasedAt = this.now(); job.leaseToken = randomHex(24);
       job.deadline = Math.min(job.deadline, this.now() + GENERATION_TIMEOUT);
       return { job: { id: job.id, leaseToken: job.leaseToken, prompt: job.prompt, conversationUrl: job.binding.conversationUrl, timeoutMs: job.deadline - this.now(), ...(job.inputImages?.length ? { images: structuredClone(job.inputImages) } : {}) } };
     });
@@ -399,6 +450,19 @@ export class BridgeStore {
       throw new BridgeError('任务与当前群、浏览器或网页对话不匹配', 409);
     }
     return job;
+  }
+
+  async stage(id, input) {
+    if (!['submitting', 'submitted', 'first_output'].includes(input.stage)) throw new BridgeError('未知网页阶段');
+    const job = this.authorize(this.data, id, input);
+    if (job.state !== 'running' || job.deadline <= this.now()) return { ok: false };
+    if (job.stages?.[input.stage] !== undefined) return { ok: true };
+    return this.commit(state => {
+      const current = this.authorize(state, id, input);
+      current.stages ??= {};
+      current.stages[input.stage] ??= this.now();
+      return { ok: true };
+    });
   }
 
   async started(id, input) {
@@ -543,10 +607,12 @@ export class BridgeStore {
   async sweep() {
     await this.blockQueuedJobs();
     const now = this.now();
-    const needs = this.data.jobs.some(j => (ACTIVE.has(j.state) && j.deadline <= now) || (j.finishedAt && j.finishedAt < now - 7 * DAY)) ||
+    const expiredContext = Object.values(this.data.groups).some(g => g.context?.some(x => x.at <= now - 120_000));
+    const needs = expiredContext || this.data.jobs.some(j => (ACTIVE.has(j.state) && j.deadline <= now) || (j.finishedAt && j.finishedAt < now - 7 * DAY)) ||
       Object.values(this.data.seen).some(t => t < now - 7 * DAY) || this.data.outbox.some(o => !o.abandoned && (o.expiresAt ?? o.createdAt + RETRY_WINDOW) <= now);
     if (!needs) { await this.sweepMedia(); return; }
     await this.commit(state => {
+      for (const group of Object.values(state.groups)) if (group.context) group.context = boundedContext(group.context, now);
       for (const job of state.jobs) if (ACTIVE.has(job.state) && job.deadline <= now) this.failJob(state, job, job.state === 'queued' ? '等待绑定网页上线超时，请确认 Chrome 与对应标签页保持打开' : '网页任务超时或页面连接已中断');
       for (const item of state.outbox) if (!item.abandoned && (item.expiresAt ?? item.createdAt + RETRY_WINDOW) <= now) {
         item.abandoned = true; item.error = 'QQ 的 5 分钟回复期限已到，已停止发送；请在网页查看结果后重新提问';
@@ -600,10 +666,13 @@ export class BridgeStore {
     });
   }
 
-  async replySent(id) {
+  async replySent(id, receipt) {
     await this.commit(state => {
       const item = state.outbox.find(item => item.id === id);
       if (!item) return;
+      const group = state.groups[item.chatId];
+      const sourceJob = state.jobs.find(job => job.id === item.jobId);
+      if (sourceJob && group?.binding?.version === sourceJob.binding?.version && typeof receipt?.messageId === 'string' && receipt.messageId.length <= 512 && !/[\s\u0000-\u001f\u007f]/u.test(receipt.messageId)) group.sentMessageIds = [...(group.sentMessageIds ?? []).filter(x => x.at > this.now() - 300_000), { id: receipt.messageId, at: this.now() }].slice(-30);
       state.outbox = state.outbox.filter(item => item.id !== id);
       if (['post', 'image'].includes(item.kind)) {
         const job = state.jobs.find(job => job.id === item.jobId);
@@ -657,11 +726,12 @@ export class BridgeStore {
       clearableHistoryCount: clearableHistoryIds(this.data).size,
       activeJobCount: this.data.jobs.filter(job => ACTIVE.has(job.state)).length,
       queuedChatIds: [...new Set(this.data.jobs.filter(job => job.state === 'queued').map(job => job.chatId))],
-      groups: Object.values(this.data.groups).map(g => ({ ...g, binding: g.binding ? { conversationUrl: g.binding.conversationUrl, browserId: g.binding.browserId, tabId: g.binding.tabId } : undefined })),
-      jobs: visibleJobs.map(({ id, chatId, state, createdAt, startedAt, error, answerDelivery, timing, finishedAt }) => {
+      groups: Object.values(this.data.groups).map(g => ({ chatId: g.chatId, lastSeen: g.lastSeen, ordinaryObservedAt: g.ordinaryObservedAt, policy: groupPolicy(g.policy), binding: g.binding ? { conversationUrl: g.binding.conversationUrl, browserId: g.binding.browserId, tabId: g.binding.tabId } : undefined })),
+      jobs: visibleJobs.map(({ id, chatId, state, createdAt, startedAt, error, answerDelivery, timing, finishedAt, leasedAt, stages, deadline }) => {
         const delivery = answerDelivery;
         const end = Number.isFinite(delivery?.finishedAt) ? delivery.finishedAt : delivery?.state === 'pending' ? this.now() : undefined;
         return { id, chatId, state: delivery?.state === 'pending' ? 'delivering' : delivery?.state === 'failed' ? 'failed' : state, createdAt, error,
+          diagnostics: { leasedAt, startedAt, stages, remainingMs: ACTIVE.has(state) ? Math.max(0, deadline - this.now()) : 0, queueWaitMs: Number.isFinite(leasedAt) ? Math.max(0, leasedAt - createdAt) : undefined },
           ...(delivery || Number.isFinite(startedAt) ? { timing: { ...timing,
             ...(Number.isFinite(startedAt) && Number.isFinite(createdAt) ? { handoffMs: Math.max(0, startedAt - createdAt) } : {}),
             ...(Number.isFinite(delivery?.startedAt ?? end) && Number.isFinite(finishedAt) ? { queueMs: Math.max(0, (delivery.startedAt ?? end) - finishedAt) } : {}),
