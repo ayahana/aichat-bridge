@@ -1,5 +1,9 @@
 # dot 本人私聊版开发计划书
 
+> 已被 [v3 dot 网页桥接方案](dot-development-plan-v3.zh-CN.md) 替代。本文仅保留历史，不再执行 companion 路线。
+
+> 已被 [v2 自编方案](dot-development-plan-v2.zh-CN.md) 替代。下文为历史计划，不再执行第三方 runtime/core 复用。
+
 状态：计划先行，等待审阅；本提交没有实现代码。日期：2026-10-20。
 
 ## 1. 基线与目标
@@ -7,14 +11,14 @@
 - 基于 `aichat-bridge` 定制群聊版提交 `c7a77cce2a321b6189902474b1ed75f51fb63ca1`，独立分支 `feat/dot-owner-private`。
 - 保留现有 ChatGPT / Claude / Gemini / Qwen 网页桥接，以及已有 QQ 群聊功能。dot 是独立服务提供方，不冒充第五个网页，也不把普通 ChatGPT 回答伪装成现有 dot。
 - 本轮 dot 仅接本人 QQ C2C 纯文字：认证 QQ 网关 → 主人过滤 → 持久消息队列 → 已授权 MCP Events 回调 → 现有 dot → 受限回复工具 → 同一个主人私聊。
-- 不支持 dot 群聊、陌生人、频道、入站附件、任意收件人或任意 URL；不创建真实账户、凭据、隧道、订阅，不安装部署，不实际收发 QQ。
+- 不支持 dot 群聊、陌生人、频道、入站附件、任意收件人或任意 URL；不创建真实账户、凭据、隧道、订阅，不安装部署，不实际收发 QQ。MCP 事件异步处理且可能按客户端设置合并批次，本版不保证更快响应。
 
 ## 2. 已确认的技术依据与复用
 
 1. 官方协议：<https://developers.openai.com/plugins/build/mcp-events>。采用 `server/discover`、`events/list`、`events/subscribe`、`events/unsubscribe` 和签名回调；不存在本项目可直接调用的“dot 模型生成 API”。事件送达 ACK 不等于 dot 已处理或 QQ 已发出。
 2. 参考实现：<https://github.com/Arcueid77/dot-qq-bridge>，固定提交 `b403176c980d460ecffa87dcd722dd8740fb6c37`。其项目 MIT 许可可用于复用，保留 A2KT 版权、许可证及来源清单。优先复用并审查现成认证、QQ 网关、SQLite 状态机、回调传输和 tunnel adapter，不另写一套安全协议。
 3. 该参考的 `@dot-bridge/core@0.2.1` 固定发行包来源 revision `fac9d7d05b6c0a5da20411d20963af5eb9c456fc`、SHA-256 `3f1c77376002432ebc748e4f32eeb559684b93a812c85e29cb0e16e43f02842a`；实施前检查内含许可与模块边界，固定版本及完整性。
-4. 参考的 `@tencent-connect/qqbot-connector@1.2.0` 标为 UNLICENSED。本版不复制、打包、依赖或运行该扫码组件；只接受操作者另行合法取得并授权使用的凭据文件。复用范围排除自动扫码、凭据创建和部署脚本。
+4. 参考的 `@tencent-connect/qqbot-connector@1.2.0` 标为 UNLICENSED。本版不复制、打包、依赖或运行该扫码组件；只接受操作者另行合法取得并授权使用的凭据文件。当前参考文件格式要求真实上游授权流程生成的 `owner_evidence=official-qr-response`；不能手工伪造该字段，也不把此标记当作本版完成了绑定验证。复用范围排除自动扫码、凭据创建和部署脚本。
 5. <https://github.com/AnctyEnly453/qq-dot-bridge> 仅作协议/网关参考，不将其作为自动 LLM 或现有 dot 的替代品。
 
 ## 3. 架构与信任边界
@@ -52,7 +56,7 @@
 
 ## 5. 部署前提与尚需实证
 
-开发交付不等于已经可直接使用。实际使用至少需要：Node 24.15 至 24.x、支持私有文件权限的宿主、持久私有磁盘、本人 QQ 官方机器人资格及合法凭据、已核实 owner ID、私有 tunnel 与仅本人可用的 MCP/plugin、明确授权的 callback 主机和订阅，以及后台 supervisor。首次存凭据、授予长期访问/增加权限、创建订阅都需要操作者另行参与。
+开发交付不等于已经可直接使用。实际使用至少需要：Node 24.15 至 24.x、支持私有文件权限的宿主、持久私有磁盘、本人 QQ 官方机器人资格及合法凭据、已核实 owner ID、私有 tunnel 与仅本人可用的 MCP/plugin、明确授权的 callback 主机和订阅，以及后台 supervisor。回调域名须核实后显式 allowlist；订阅按服务授予的 refreshBefore 续订，过期立即停止，不无限续命。Linux / Windows 私有文件路径已有上游实现，但本轮只验证实际执行环境；其他 OS 需单独验证，不将未测写成不可能。首次存凭据、授予长期访问/增加权限、创建订阅都需要操作者另行参与。
 
 必须在独立验收中证明：真实 dot 能发现工具和事件、正确订阅和续期、QQ 本人消息触发的确是原 dot、回复只到原私聊、陌生人/群被过滤、短答/长答/连续消息正确、断线与进程重启不重复、被动回复窗口与限流符合实际账号、撤销立即停止、关闭浏览器后服务生命周期符合预期。当前无真实凭据，不以 mock、历史上游报告或一次 ACK 代替上述实测。
 

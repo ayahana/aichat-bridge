@@ -1,5 +1,7 @@
 # dot 本人私聊版开发计划 v2
 
+> 已被 [v3 dot 网页桥接方案](dot-development-plan-v3.zh-CN.md) 替代。本文仅保留历史，不再执行 companion 路线。
+
 2026-10-20。依据最新要求：自己编写 dot 接入，不复用 dot-qq-bridge 或其 core 代码。本文件替代 v1 的复用方案；v1 仅为开发顺序的历史记录。
 
 ## 范围与基础
